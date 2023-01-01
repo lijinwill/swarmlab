@@ -4,6 +4,8 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
     % navigation of a swarm of agents in presence of obstacles and walls.
     %
     % Ref:      Vasarhelyi, Science Robotics, 2018
+    %       Vásárhelyi G, Virágh C, Somorjai G, et al. Optimized flocking of autonomous drones
+    %       in confined environments[J]. Science Robotics, 2018, 3(20): eaat3536.
     % 
     % Modif:    a cohesion term has been added to make the agents get
     %           closer when they are farther than r0_rep.
@@ -36,7 +38,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
     
     nb_agent_collisions = 0; % Nb of collisions among agents
     nb_obs_collisions = 0; % Nb of collisions against obstacles
-    min_dist_obs = 20;
+    min_dist_obs = 20; % 猜测是离障碍物的最小距离
 
     
     %% Compute velocity commands
@@ -47,7 +49,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         %% Find neighbors
         
         % Compute agent-agent distance matrix
-        p_rel = pos - pos(:, agent);
+        p_rel = pos - pos(:, agent);% 其他agent坐标减去当前agent坐标
         dist = sqrt(sum((p_rel.^2), 1));
         dist_mat(agent, :) = dist;
 
@@ -62,6 +64,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         nb_neig = nb_agents - 1;
 
         % Constraint on neighborhood given by the euclidean distance
+        % 这里计算邻居数量nb_neig，其中p_swarm.r来自param_swarm，表示最大影响距离，小于此距离的都是邻居
         if isfield(p_swarm, 'r')
             neig_list = neig_list(dist(neig_list) < p_swarm.r);
             nb_neig = length(neig_list);
@@ -77,6 +80,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         end
 
         % Adjacency matrix (asymmetric in case of limited fov)
+        % 矩阵形式记录邻居，下面再也没用过
         M(agent, neig_list) = 1;
 
         
@@ -84,9 +88,10 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         
         if nb_neig ~= 0
             v_rel = vel - vel(:, agent);
-            v_rel_norm = sqrt(sum((v_rel.^2), 1));
+            v_rel_norm = sqrt(sum((v_rel.^2), 1));%类似于距离dist，只不过是用速度矢量算出来的
 
             % Compute vel and pos unit vector between two agents
+            % 这个p_rel_u就是论文里面的ri-rj/rij，表明一种方向性
             p_rel_u = -p_rel ./ dist;
             v_rel_u = -v_rel ./ v_rel_norm;
 
@@ -94,6 +99,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
                 
                 % Repulsion and attraction
                 if dist(agent2) < p_swarm.r0_rep  % repulsion
+                    %下面这行代码来自论文第7页和第8页的公式2和3
                     vel_rep(:, agent) = vel_rep(:, agent) + ...
                         p_swarm.p_rep * (p_swarm.r0_rep - dist(agent2)) * p_rel_u(:, agent2);
                 else  % attraction
@@ -102,8 +108,10 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
                 end
 
                 % Velocity alignement
+                % 公式4和公式5
                 v_fric_max = get_v_max(p_swarm.v_fric, dist(agent2) - p_swarm.r0_fric, p_swarm.a_fric, p_swarm.p_fric);
 
+                % 公式6
                 if v_rel_norm(agent2) > v_fric_max
                     vel_fric(:, agent) = vel_fric(:, agent) + ...
                         p_swarm.C_fric * (v_rel_norm(agent2) - v_fric_max) * v_rel_u(:, agent2);
@@ -113,7 +121,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         
         
         %% Wall and obstacle avoidance
-
+        % 下面三个模块的并列的，第一个是关于边界墙的，第三个是有圆柱形障碍物的
         % Add arena repulsion effect
         if (p_swarm.is_active_arena == true)
             unit = eye(3);
@@ -196,11 +204,14 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
                 if dist_ab < min_dist_obs
                     min_dist_obs = dist_ab;
                 end
-
+                
+                % 第8页公式8
                 v_obs_max = get_v_max(0, dist_ab - p_swarm.r0_shill, p_swarm.a_shill, p_swarm.p_shill);
 
+                % 第8页公式9
                 if vel_ab > v_obs_max
-                    vel_obs(1:2, agent) = vel_obs(1:2, agent) + (vel_ab - v_obs_max) * (v_obs_virtual - vel(1:2, agent)) ./ vel_ab;
+                    vel_obs(1:2, agent) = vel_obs(1:2, agent) + ...
+                        (vel_ab - v_obs_max) * (v_obs_virtual - vel(1:2, agent)) ./ vel_ab;
                 end
 
             end
@@ -209,9 +220,12 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
         
         %% Sum agent-agent and obstacle contributions
 
+        % 公式10
         vel_command(:, agent) = vel_rep(:, agent) + vel_fric(:, agent) + vel_obs(:, agent) + vel_wall(:, agent);
 
         % Add self propulsion OR migration term
+        % 下面代码的意思是公式10最左边那个项，即给予的集群基础速度的形式与大小
+        % 可以是向着一个方向迁徙，也可以是朝着一个给定的目标
         v_norm = sqrt(sum((vel(:, agent).^2), 1));
 
         if p_swarm.is_active_migration == true% migration
@@ -221,7 +235,7 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
             u_goal = x_goal_rel / norm(x_goal_rel);
             vel_command(:, agent) = vel_command(:, agent) + p_swarm.v_ref * u_goal;
         else
-            % self-propulsion
+            % self-propulsion，即每个个体没有方向漫无目的的运动
             if v_norm > 0
                 vel_command(:, agent) = vel_command(:, agent) + p_swarm.v_ref * vel(:, agent) / v_norm;
             end
@@ -241,16 +255,19 @@ function [vel_command, collisions] = compute_vel_vasarhelyi(self, p_swarm, r_age
     end
 
     % Bound velocities and acceleration
+    % 这个部分的作用是限制最大速度，论文公式11
     if ~isempty(p_swarm.max_v)
         vel_cmd_norm = sqrt(sum((vel_command.^2), 1));
-        v_norm = sqrt(sum((vel.^2), 1));
+        %v_norm = sqrt(sum((vel.^2), 1));
         
-        idx_to_bound = (vel_cmd_norm > p_swarm.max_v);
+        idx_to_bound = (vel_cmd_norm > p_swarm.max_v);%这个表明此轮速度中需要被限制的agent的idx
+        % 如果存在这种个体，则将速度命令修改为最大速度*该速度原先的方向
         if sum(idx_to_bound) > 0
             vel_command(:, idx_to_bound) = p_swarm.max_v * ...
                 vel_command(:, idx_to_bound) ./ repmat(vel_cmd_norm(idx_to_bound), 3, 1);
         end
     end
+    % 类似上面，但是是限制最大加速度
     if ~isempty(p_swarm.max_a)
         accel_cmd = (vel_command-vel)./dt;
         accel_cmd_norm = sqrt(sum(accel_cmd.^2, 1));
@@ -268,7 +285,7 @@ end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Calculate V fric max
-%
+% 这function是论文第八页公式4和公式5
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 function [ v_fricmax ] = get_v_max(v_fric, r, a, p)
